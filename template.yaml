@@ -1,0 +1,529 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  Name:
+    Type: String
+    Default: pipeline-for-ecs-devploy-v2
+  GitHubOwner:
+    Type: String
+    Default: nemodija
+  GitHubRepo:
+    Type: String
+    Default: hello-node-world-by-express
+  GitHubBranch:
+    Type: String
+    Default: master
+  GitHubOAuthToken:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: pipeline-for-ecs-devploy-v2-github-oauth-token
+
+Resources:
+  #    # ###### ##### #    #  ####  #####  #    # # #    #  ####
+  ##   # #        #   #    # #    # #    # #   #  # ##   # #    #
+  # #  # #####    #   #    # #    # #    # ####   # # #  # #
+  #  # # #        #   # ## # #    # #####  #  #   # #  # # #  ###
+  #   ## #        #   ##  ## #    # #   #  #   #  # #   ## #    #
+  #    # ######   #   #    #  ####  #    # #    # # #    #  ####
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.38.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.38.0.0/24
+      VpcId: !Ref Vpc
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet1
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.38.1.0/24
+      VpcId: !Ref Vpc
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet2
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId: !Ref RouteTable
+      GatewayId: !Ref InternetGateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: !Ref Name
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 3000
+        ToPort: 3000
+        IpProtocol: tcp
+
+  ##### ######  ####  ##### # #    #  ####
+    #   #      #        #   # ##   # #    #
+    #   #####   ####    #   # # #  # #
+    #   #           #   #   # #  # # #  ###
+    #   #      #    #   #   # #   ## #    #
+    #   ######  ####    #   # #    #  ####
+  Testing:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Name}-testing
+      ServiceRole: !GetAtt TestingServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Ref S3Bucket
+        Name: /
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        PrivilegedMode: true
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 10
+            pre_build:
+              commands:
+              - npm install
+            build:
+              commands:
+              - npm test
+          artifacts:
+            files:
+            - '**/*'
+      TimeoutInMinutes: 60
+    DependsOn:
+    - TestingManagedPolicy
+  TestingServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /service-role/
+  TestingManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+      - !Ref TestingServiceRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${Name}-testing"
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${Name}-testing:*"
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:GetObjectVersion
+          Resource:
+          - !Sub "arn:aws:s3:::${S3Bucket}/*"
+
+  #####  #    # # #      #####
+  #    # #    # # #      #    #
+  #####  #    # # #      #    #
+  #    # #    # # #      #    #
+  #    # #    # # #      #    #
+  #####   ####  # ###### #####
+  Build:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${Name}-build
+      ServiceRole: !GetAtt BuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Ref S3Bucket
+        Name: /
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        PrivilegedMode: true
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          env:
+            variables:
+              REPOSITORY_URI: "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}"
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 10
+            pre_build:
+              commands:
+              - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)
+            build:
+              commands:
+              - docker build -t $REPOSITORY_URI:latest .
+              - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$CODEBUILD_BUILD_NUMBER
+            post_build:
+              commands:
+              - docker push $REPOSITORY_URI
+              - printf '[{"name":"app","imageUri":"%s"}]' $REPOSITORY_URI:$CODEBUILD_BUILD_NUMBER > imagedefinitions.json
+          artifacts:
+            files:
+            - imagedefinitions.json
+      TimeoutInMinutes: 60
+    DependsOn:
+    - BuildManagedPolicy
+  BuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /service-role/
+  BuildManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+      - !Ref BuildServiceRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource:
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${Name}-build"
+          - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${Name}-build:*"
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          - s3:GetObject
+          - s3:GetObjectVersion
+          Resource:
+          - !Sub "arn:aws:s3:::${S3Bucket}/*"
+        - Effect: Allow
+          Action: "ecr:*"
+          Resource: "*"
+
+  #####  ###### #####  #       ####  #   #
+  #    # #      #    # #      #    #  # #
+  #    # #####  #    # #      #    #   #
+  #    # #      #####  #      #    #   #
+  #    # #      #      #      #    #   #
+  #####  ###### #      ######  ####    #
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref Name
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref Name
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+      - Name: app
+        Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepository}"
+        PortMappings:
+        - ContainerPort: 3000
+          HostPort: 3000
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref EcsLogGroup
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: dev
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+  EcsTaskExecutionManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+      - !Ref EcsTaskExecutionRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+          - ecr:GetAuthorizationToken
+          - ecr:BatchCheckLayerAvailability
+          - ecr:GetDownloadUrlForLayer
+          - ecr:BatchGetImage
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: "*"
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref Name
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref EcsCluster
+      LaunchType: FARGATE
+      DesiredCount: 0
+      TaskDefinition: !Ref EcsTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+          - !Ref SecurityGroup
+          Subnets:
+          - !Ref Subnet1
+          - !Ref Subnet2
+  EcsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref Name
+
+  #####  # #####  ###### #      # #    # ######
+  #    # # #    # #      #      # ##   # #
+  #    # # #    # #####  #      # # #  # #####
+  #####  # #####  #      #      # #  # # #
+  #      # #      #      #      # #   ## #
+  #      # #      ###### ###### # #    # ######
+  S3Bucket:
+    Type: AWS::S3::Bucket
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref Name
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      ArtifactStore: 
+        Type: S3
+        Location: !Ref S3Bucket
+      Stages:
+      - Name: Source
+        Actions: 
+        - Name: Source
+          ActionTypeId: 
+            Category: Source
+            Owner: ThirdParty
+            Version: 1
+            Provider: GitHub
+          OutputArtifacts: 
+          - Name: SourceOutput
+          Configuration:
+            Owner: !Ref GitHubOwner
+            Repo: !Ref GitHubRepo
+            Branch: !Ref GitHubBranch
+            OAuthToken: !Ref GitHubOAuthToken
+          RunOrder: 1
+      - Name: Testing
+        Actions: 
+        - Name: CodeBuild
+          ActionTypeId: 
+            Category: Build
+            Owner: AWS
+            Version: 1
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: SourceOutput
+          OutputArtifacts: 
+          - Name: TestingOutput
+          Configuration:
+            ProjectName: !Ref Testing
+          RunOrder: 1
+      - Name: Build
+        Actions: 
+        - Name: CodeBuild
+          ActionTypeId: 
+            Category: Build
+            Owner: AWS
+            Version: 1
+            Provider: CodeBuild
+          InputArtifacts:
+          - Name: TestingOutput
+          OutputArtifacts: 
+          - Name: BuildOutput
+          Configuration:
+            ProjectName: !Ref Build
+          RunOrder: 1
+      - Name: Staging
+        Actions:
+        - Name: ECS
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Version: 1
+            Provider: ECS
+          InputArtifacts:
+          - Name: BuildOutput
+          Configuration:
+            ClusterName: !Ref EcsCluster
+            ServiceName: !Ref EcsService
+            FileName: imagedefinitions.json
+          RunOrder: 1
+    DependsOn:
+    - PipelineManagedPolicy
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /service-role/
+  PipelineManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+      - !Ref PipelineServiceRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          - s3:GetObjectVersion
+          - s3:GetBucketVersioning
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          Resource:
+          - "arn:aws:s3:::codepipeline*"
+          - "arn:aws:s3:::elasticbeanstalk*"
+        - Effect: Allow
+          Action:
+          - codecommit:CancelUploadArchive
+          - codecommit:GetBranch
+          - codecommit:GetCommit
+          - codecommit:GetUploadArchiveStatus
+          - codecommit:UploadArchive
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - codedeploy:CreateDeployment
+          - codedeploy:GetApplicationRevision
+          - codedeploy:GetDeployment
+          - codedeploy:GetDeploymentConfig
+          - codedeploy:RegisterApplicationRevision
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - "elasticbeanstalk:*"
+          - "ec2:*"
+          - "elasticloadbalancing:*"
+          - "autoscaling:*"
+          - "cloudwatch:*"
+          - "s3:*"
+          - "sns:*"
+          - "cloudformation:*"
+          - "rds:*"
+          - "sqs:*"
+          - "ecs:*"
+          - "iam:PassRole"
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - lambda:InvokeFunction
+          - lambda:ListFunctions
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - opsworks:CreateDeployment
+          - opsworks:DescribeApps
+          - opsworks:DescribeCommands
+          - opsworks:DescribeDeployments
+          - opsworks:DescribeInstances
+          - opsworks:DescribeStacks
+          - opsworks:UpdateApp
+          - opsworks:UpdateStack
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - cloudformation:CreateStack
+          - cloudformation:DeleteStack
+          - cloudformation:DescribeStacks
+          - cloudformation:UpdateStack
+          - cloudformation:CreateChangeSet
+          - cloudformation:DeleteChangeSet
+          - cloudformation:DescribeChangeSet
+          - cloudformation:ExecuteChangeSet
+          - cloudformation:SetStackPolicy
+          - cloudformation:ValidateTemplate
+          - iam:PassRole
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - codebuild:BatchGetBuilds
+          - codebuild:StartBuild
+          Resource: "*"
+        - Effect: Allow
+          Action:
+          - devicefarm:ListProjects
+          - devicefarm:ListDevicePools
+          - devicefarm:GetRun
+          - devicefarm:GetUpload
+          - devicefarm:CreateUpload
+          - devicefarm:ScheduleRun
+          Resource: "*"
+
+Outputs:
+  EcsCluster:
+    Value: !Ref EcsCluster
+  EcsService:
+    Value: !GetAtt EcsService.Name
+  S3Bucket:
+    Value: !Ref S3Bucket
+  EcrRepository:
+    Value: !Ref EcrRepository
