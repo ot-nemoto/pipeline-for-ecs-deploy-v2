@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
   Name:
     Type: String
-    Default: pipeline-for-ecs-devploy-v2
+    Default: pipeline-for-ecs-deploy-v2
   GitHubOwner:
     Type: String
     Default: nemodija
@@ -15,7 +15,7 @@ Parameters:
     Default: master
   GitHubOAuthToken:
     Type: AWS::SSM::Parameter::Value<String>
-    Default: pipeline-for-ecs-devploy-v2-github-oauth-token
+    Default: pipeline-for-ecs-deploy-v2-github-oauth-token
 
 Resources:
   #    # ###### ##### #    #  ####  #####  #    # # #    #  ####
